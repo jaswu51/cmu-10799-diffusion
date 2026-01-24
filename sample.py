@@ -32,7 +32,7 @@ import torch
 from tqdm import tqdm
 
 from src.models import create_model_from_config
-from src.data import save_image
+from src.data import save_image, unnormalize
 from src.methods import DDPM
 from src.utils import EMA
 
@@ -57,6 +57,7 @@ def save_samples(
     samples: torch.Tensor,
     save_path: str,
     num_samples: int,
+    nrow: int = None,
 ) -> None:
     """
     TODO: save generated samples as images.
@@ -67,7 +68,12 @@ def save_samples(
         num_samples: Number of samples, used to calculate grid layout.
     """
 
-    raise NotImplementedError
+    # Unnormalize from [-1, 1] to [0, 1] for saving
+    samples = unnormalize(samples.detach().cpu())
+    if nrow is None:
+        nrow = int(num_samples ** 0.5)
+    nrow = max(1, nrow)
+    save_image(samples, save_path, nrow=nrow)
 
 
 def main():
@@ -166,7 +172,7 @@ def main():
             else:
                 for i in range(samples.shape[0]):
                     img_path = os.path.join(args.output_dir, f"{sample_idx:06d}.png")
-                    save_samples(samples, img_path, 1)
+                    save_samples(samples[i:i+1], img_path, 1)
                     sample_idx += 1
 
             remaining -= batch_size
@@ -183,7 +189,7 @@ def main():
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             args.output = f"samples_{timestamp}.png"
 
-        save_samples(all_samples, args.output, nrow=8)
+        save_samples(all_samples, args.output, args.num_samples)
         print(f"Saved grid to {args.output}")
     else:
         print(f"Saved {args.num_samples} individual images to {args.output_dir}")

@@ -87,8 +87,86 @@ class UNet(nn.Module):
         self.dropout = dropout
         self.use_scale_shift_norm = use_scale_shift_norm
         
-        # TODO: build your own unet architecture here
-        # Pro tips: remember to take care of the time embeddings!
+        time_embed_dim = base_channels * 4
+        self.time_embed = TimestepEmbedding(time_embed_dim, hidden_dim=time_embed_dim)
+
+        self.input_conv = nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1)
+
+        self.down_blocks = nn.ModuleList()
+        self.down_attn = nn.ModuleList()
+        self.downsamples = nn.ModuleList()
+
+        self.up_blocks = nn.ModuleList()
+        self.up_attn = nn.ModuleList()
+        self.upsamples = nn.ModuleList()
+
+        self.mid_block1 = ResBlock(
+            base_channels * channel_mult[-1],
+            base_channels * channel_mult[-1],
+            time_embed_dim,
+            dropout=dropout,
+            use_scale_shift_norm=use_scale_shift_norm,
+        )
+        self.mid_attn = AttentionBlock(base_channels * channel_mult[-1], num_heads=num_heads)
+        self.mid_block2 = ResBlock(
+            base_channels * channel_mult[-1],
+            base_channels * channel_mult[-1],
+            time_embed_dim,
+            dropout=dropout,
+            use_scale_shift_norm=use_scale_shift_norm,
+        )
+
+        self.out_norm = GroupNorm32(32, base_channels)
+        self.out_conv = nn.Conv2d(base_channels, out_channels, kernel_size=3, padding=1)
+
+        # Build encoder
+        resolution = 64
+        ch = base_channels
+        down_channels = []
+        for level, mult in enumerate(channel_mult):
+            out_ch = base_channels * mult
+            for _ in range(num_res_blocks):
+                self.down_blocks.append(
+                    ResBlock(
+                        ch,
+                        out_ch,
+                        time_embed_dim,
+                        dropout=dropout,
+                        use_scale_shift_norm=use_scale_shift_norm,
+                    )
+                )
+                if resolution in attention_resolutions:
+                    self.down_attn.append(AttentionBlock(out_ch, num_heads=num_heads))
+                else:
+                    self.down_attn.append(nn.Identity())
+                ch = out_ch
+                down_channels.append(ch)
+            if level != len(channel_mult) - 1:
+                self.downsamples.append(Downsample(ch))
+                resolution //= 2
+
+        # Build decoder
+        for level, mult in reversed(list(enumerate(channel_mult))):
+            out_ch = base_channels * mult
+            for _ in range(num_res_blocks):
+                skip_ch = down_channels.pop()
+                self.up_blocks.append(
+                    ResBlock(
+                        ch + skip_ch,
+                        out_ch,
+                        time_embed_dim,
+                        dropout=dropout,
+                        use_scale_shift_norm=use_scale_shift_norm,
+                    )
+                )
+                if resolution in attention_resolutions:
+                    self.up_attn.append(AttentionBlock(out_ch, num_heads=num_heads))
+                else:
+                    self.up_attn.append(nn.Identity())
+                ch = out_ch
+            if level != 0:
+                self.upsamples.append(Upsample(ch))
+                resolution *= 2
     
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """
@@ -102,8 +180,44 @@ class UNet(nn.Module):
         Returns:
             Output tensor of shape (batch_size, out_channels, height, width)
         """
+        time_emb = self.time_embed(t)
 
-        raise NotImplementedError
+        h = self.input_conv(x)
+        hs = []
+
+        down_idx = 0
+        downsample_idx = 0
+        for level, _ in enumerate(self.channel_mult):
+            for _ in range(self.num_res_blocks):
+                h = self.down_blocks[down_idx](h, time_emb)
+                h = self.down_attn[down_idx](h)
+                hs.append(h)
+                down_idx += 1
+            if level != len(self.channel_mult) - 1:
+                h = self.downsamples[downsample_idx](h)
+                downsample_idx += 1
+
+        h = self.mid_block1(h, time_emb)
+        h = self.mid_attn(h)
+        h = self.mid_block2(h, time_emb)
+
+        up_idx = 0
+        upsample_idx = 0
+        for level, _ in reversed(list(enumerate(self.channel_mult))):
+            for _ in range(self.num_res_blocks):
+                skip = hs.pop()
+                h = torch.cat([h, skip], dim=1)
+                h = self.up_blocks[up_idx](h, time_emb)
+                h = self.up_attn[up_idx](h)
+                up_idx += 1
+            if level != 0:
+                h = self.upsamples[upsample_idx](h)
+                upsample_idx += 1
+
+        h = self.out_norm(h)
+        h = F.silu(h)
+        h = self.out_conv(h)
+        return h
 
 
 def create_model_from_config(config: dict) -> UNet:

@@ -36,7 +36,23 @@ image = (
         "torch-fidelity>=0.3.0",  # Comprehensive evaluation metrics
     )
     # Copy the local project directory into the image
-    .add_local_dir(".", "/root", ignore=[".git", ".venv*", "venv", "__pycache__", "logs", "checkpoints", "*.md", "docs", "environments", "notebooks"])
+    .add_local_dir(
+        ".",
+        "/root",
+        ignore=[
+            ".git",
+            ".venv*",
+            "venv",
+            "__pycache__",
+            "logs",
+            "checkpoints",
+            "data",
+            "*.md",
+            "docs",
+            "environments",
+            "notebooks",
+        ],
+    )
 )
 
 # Create a persistent volume for checkpoints and data
@@ -205,6 +221,7 @@ def sample(
     checkpoint: str = "checkpoints/ddpm/ddpm_final.pt",
     num_samples: int = None,
     num_steps: int = None,
+    seed: int = None,
 ):
     """
     Generate samples from a trained model.
@@ -235,6 +252,8 @@ def sample(
         cmd.extend(["--num_samples", str(num_samples)])
     if num_steps is not None:
         cmd.extend(["--num_steps", str(num_steps)])
+    if seed is not None:
+        cmd.extend(["--seed", str(seed)])
 
     subprocess.run(cmd, check=True)
     volume.commit()
@@ -465,6 +484,11 @@ def main(
     learning_rate: float = None,
     num_samples: int = None,
     num_steps: int = None,
+    seed: int = None,
+    app_id: str = None,
+    log_file: str = None,
+    loss_csv: str = None,
+    loss_png: str = None,
     metrics: str = None,
     overfit_single_batch: bool = False,
     override: bool = False,
@@ -518,6 +542,7 @@ def main(
             checkpoint=checkpoint,
             num_samples=num_samples,
             num_steps=num_steps,
+            seed=seed,
         )
         print(result)
     elif action == "evaluate" or action == "evaluate_torch_fidelity":
@@ -540,6 +565,98 @@ def main(
 
         result = evaluate_torch_fidelity.remote(**eval_kwargs)
         print(result)
+    elif action == "plot_loss":
+        # Local-only utility: pull Modal app logs and generate a loss curve CSV/PNG
+        # Example:
+        #   modal run modal_app.py --action plot_loss --app-id ap-XXXX --loss-csv hw_answers/hw1/loss.csv --loss-png hw_answers/hw1/loss.png
+        # If Modal app logs don't contain tqdm output (common), you can pass a local log file:
+        #   modal run modal_app.py --action plot_loss --log-file /abs/path/to/log.txt ...
+        if app_id is None and log_file is None:
+            raise ValueError(
+                "For --action plot_loss, provide either --app-id (Modal logs) or --log-file (local logs)."
+            )
+
+        import csv
+        import re
+        import subprocess
+        from datetime import datetime
+        from pathlib import Path
+
+        # Defaults
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if loss_csv is None:
+            loss_csv = f"loss_curve_{app_id}_{timestamp}.csv"
+        if loss_png is None:
+            loss_png = f"loss_curve_{app_id}_{timestamp}.png"
+
+        loss_csv_path = Path(loss_csv)
+        loss_png_path = Path(loss_png)
+        loss_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        loss_png_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Load logs
+        if log_file is not None:
+            text = Path(log_file).read_text(errors="ignore")
+        else:
+            proc = subprocess.run(
+                ["modal", "app", "logs", app_id],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            text = proc.stdout
+
+        # Strip ANSI escape codes (colors, cursor moves)
+        text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+
+        # Parse lines like:
+        #  70%|...| 70099/100000 [...] loss=0.0158, steps/s=4.33
+        # Note: tqdm may print multiple progress chunks on a single line; use finditer.
+        pat = re.compile(r"(?P<step>\d+)/\d+.*?loss=(?P<loss>[0-9.]+)")
+        step_to_loss = {}
+        for line in text.splitlines():
+            for m in pat.finditer(line):
+                step = int(m.group("step"))
+                loss = float(m.group("loss"))
+                step_to_loss[step] = loss  # keep last occurrence per step
+
+        steps = sorted(step_to_loss.keys())
+        if not steps:
+            raise RuntimeError(
+                "No loss values found in logs. "
+                "Expected lines containing '... step/total ... loss=...'. "
+                "Try a different --app-id, or use --log-file pointing to a terminal capture that includes tqdm output."
+            )
+
+        # Write CSV
+        with open(loss_csv_path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["step", "loss"])
+            for s in steps:
+                w.writerow([s, step_to_loss[s]])
+
+        print(f"Wrote loss CSV to: {loss_csv_path}")
+        print(f"Parsed {len(steps)} points from Modal logs for app_id={app_id}")
+
+        # Try to plot if matplotlib exists
+        try:
+            import matplotlib.pyplot as plt  # type: ignore
+
+            ys = [step_to_loss[s] for s in steps]
+            plt.figure(figsize=(6, 4))
+            plt.plot(steps, ys, linewidth=1)
+            plt.xlabel("step")
+            plt.ylabel("train loss")
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.savefig(loss_png_path, dpi=200)
+            plt.close()
+            print(f"Wrote loss PNG to: {loss_png_path}")
+        except Exception as e:
+            print(
+                "Could not generate PNG plot (matplotlib missing or failed). "
+                f"CSV is still available. Error: {e}"
+            )
     else:
         print(f"Unknown action: {action}")
-        print("Valid actions: download, train, sample, evaluate")
+        print("Valid actions: download, train, sample, evaluate, plot_loss")

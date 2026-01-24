@@ -237,8 +237,11 @@ def generate_samples(
     if use_ema:
         ema.apply_shadow()
 
-    samples = None
-    # TODO: sample with your method.sample()
+    samples = method.sample(
+        batch_size=num_samples,
+        image_shape=image_shape,
+        **sampling_kwargs,
+    )
 
     if use_ema:
         ema.restore()
@@ -261,7 +264,11 @@ def save_samples(
         num_samples: Number of samples, used to calculate grid layout.
     """
 
-    raise NotImplementedError
+    # Unnormalize from [-1, 1] to [0, 1] for saving
+    samples = unnormalize(samples.detach().cpu())
+    nrow = int(math.sqrt(num_samples))
+    nrow = max(1, nrow)
+    save_image(samples, save_path, nrow=nrow)
 
 
 def train(
@@ -399,6 +406,8 @@ def train(
         method = DDPM.from_config(model, config, device)
     else:
         raise ValueError(f"Unknown method: {method_name}. Only 'ddpm' is currently supported.")
+    if is_main_process and method_name == 'ddpm':
+        print(f"DDPM parameterization: {method.parameterization}")
 
     # Create optimizer
     optimizer = create_optimizer(model, config) # default to AdamW optimizer
@@ -662,6 +671,13 @@ def main():
                        help='Method to train (currently only ddpm is supported)')
     parser.add_argument('--config', type=str, required=True,
                        help='Path to config file (e.g., configs/ddpm.yaml)')
+    parser.add_argument(
+        '--parameterization',
+        type=str,
+        choices=['eps', 'x0', 'v'],
+        default=None,
+        help='DDPM parameterization: eps (default), x0, or v',
+    )
     parser.add_argument('--resume', type=str, default=None,
                        help='Path to checkpoint to resume from')
     parser.add_argument('--overfit-single-batch', action='store_true',
@@ -675,6 +691,9 @@ def main():
     # Override with resume path if specified
     if args.resume:
         config['checkpoint']['resume'] = args.resume
+    if args.parameterization:
+        config.setdefault('ddpm', {})
+        config['ddpm']['parameterization'] = args.parameterization
 
     # Train
     train(

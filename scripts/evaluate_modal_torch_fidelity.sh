@@ -22,6 +22,8 @@ NUM_SAMPLES=1000
 BATCH_SIZE=256
 NUM_STEPS=1000
 
+OVERRIDE=""
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -31,6 +33,7 @@ while [[ $# -gt 0 ]]; do
         --num-samples) NUM_SAMPLES="$2"; shift 2 ;;
         --batch-size) BATCH_SIZE="$2"; shift 2 ;;
         --num-steps) NUM_STEPS="$2"; shift 2 ;;
+        --override) OVERRIDE="--override"; shift 1 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -45,6 +48,7 @@ if [ -z "$CHECKPOINT" ]; then
     echo "  --num-samples <N>         Number of samples (default: 1000)"
     echo "  --batch-size <N>          Batch size (default: 256)"
     echo "  --num-steps <N>           Sampling steps (default: 1000)"
+    echo "  --override                Force regeneration of samples"
     exit 1
 fi
 
@@ -57,6 +61,7 @@ echo "Metrics: $METRICS"
 echo "Num samples: $NUM_SAMPLES"
 echo "Batch size: $BATCH_SIZE"
 echo "Num steps: $NUM_STEPS"
+echo "Override: ${OVERRIDE:-false}"
 echo "=========================================="
 echo ""
 echo "Submitting to Modal..."
@@ -69,7 +74,8 @@ MODAL_CMD="modal run modal_app.py::main --action evaluate_torch_fidelity \
     --metrics $METRICS \
     --num-samples $NUM_SAMPLES \
     --batch-size $BATCH_SIZE \
-    --num-steps $NUM_STEPS"
+    --num-steps $NUM_STEPS \
+    $OVERRIDE"
 
 # Run Modal command
 eval $MODAL_CMD
