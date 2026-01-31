@@ -21,6 +21,8 @@ METRICS="kid"
 NUM_SAMPLES=1000
 BATCH_SIZE=256
 NUM_STEPS=1000
+SAMPLER=""
+ETA=""
 
 OVERRIDE=""
 
@@ -33,6 +35,8 @@ while [[ $# -gt 0 ]]; do
         --num-samples) NUM_SAMPLES="$2"; shift 2 ;;
         --batch-size) BATCH_SIZE="$2"; shift 2 ;;
         --num-steps) NUM_STEPS="$2"; shift 2 ;;
+        --sampler) SAMPLER="$2"; shift 2 ;;
+        --eta) ETA="$2"; shift 2 ;;
         --override) OVERRIDE="--override"; shift 1 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
@@ -61,6 +65,8 @@ echo "Metrics: $METRICS"
 echo "Num samples: $NUM_SAMPLES"
 echo "Batch size: $BATCH_SIZE"
 echo "Num steps: $NUM_STEPS"
+echo "Sampler: ${SAMPLER:-default}"
+echo "Eta: ${ETA:-default}"
 echo "Override: ${OVERRIDE:-false}"
 echo "=========================================="
 echo ""
@@ -75,6 +81,8 @@ MODAL_CMD="modal run modal_app.py::main --action evaluate_torch_fidelity \
     --num-samples $NUM_SAMPLES \
     --batch-size $BATCH_SIZE \
     --num-steps $NUM_STEPS \
+    ${SAMPLER:+--sampler $SAMPLER} \
+    ${ETA:+--eta $ETA} \
     $OVERRIDE"
 
 # Run Modal command

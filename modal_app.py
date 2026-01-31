@@ -222,6 +222,8 @@ def sample(
     num_samples: int = None,
     num_steps: int = None,
     seed: int = None,
+    sampler: str = None,
+    eta: float = None,
 ):
     """
     Generate samples from a trained model.
@@ -254,6 +256,10 @@ def sample(
         cmd.extend(["--num_steps", str(num_steps)])
     if seed is not None:
         cmd.extend(["--seed", str(seed)])
+    if sampler is not None:
+        cmd.extend(["--sampler", str(sampler)])
+    if eta is not None:
+        cmd.extend(["--eta", str(eta)])
 
     subprocess.run(cmd, check=True)
     volume.commit()
@@ -315,6 +321,8 @@ def evaluate_torch_fidelity(
     num_samples: int = 5000,
     batch_size: int = 128,
     num_steps: int = None,
+    sampler: str = None,
+    eta: float = None,
     override: bool = False,
 ):
     """
@@ -329,6 +337,8 @@ def evaluate_torch_fidelity(
         num_samples: Number of samples to generate
         batch_size: Batch size
         num_steps: Sampling steps (optional)
+        sampler: Sampling algorithm passed to sample.py (optional)
+        eta: DDIM eta passed to sample.py (optional)
         override: Force regenerate samples even if they exist
     """
     import sys
@@ -422,6 +432,10 @@ def evaluate_torch_fidelity(
 
         if num_steps:
             sample_cmd.extend(["--num_steps", str(num_steps)])
+        if sampler is not None:
+            sample_cmd.extend(["--sampler", str(sampler)])
+        if eta is not None:
+            sample_cmd.extend(["--eta", str(eta)])
 
         subprocess.run(sample_cmd, check=True)
         print(f"Generated {num_samples} samples to {generated_dir}")
@@ -485,6 +499,8 @@ def main(
     num_samples: int = None,
     num_steps: int = None,
     seed: int = None,
+    sampler: str = None,
+    eta: float = None,
     app_id: str = None,
     log_file: str = None,
     loss_csv: str = None,
@@ -543,6 +559,8 @@ def main(
             num_samples=num_samples,
             num_steps=num_steps,
             seed=seed,
+            sampler=sampler,
+            eta=eta,
         )
         print(result)
     elif action == "evaluate" or action == "evaluate_torch_fidelity":
@@ -562,6 +580,10 @@ def main(
             eval_kwargs['batch_size'] = batch_size
         if num_steps is not None:
             eval_kwargs['num_steps'] = num_steps
+        if sampler is not None:
+            eval_kwargs['sampler'] = sampler
+        if eta is not None:
+            eval_kwargs['eta'] = eta
 
         result = evaluate_torch_fidelity.remote(**eval_kwargs)
         print(result)

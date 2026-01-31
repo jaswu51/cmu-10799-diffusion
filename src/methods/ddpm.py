@@ -139,7 +139,7 @@ class DDPM(BaseMethod):
     # =========================================================================
     
     @torch.no_grad()
-    def reverse_process(self, x_t: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    def reverse_process_ddpm(self, x_t: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """
         TODO: Implement one step of the DDPM reverse process
 
@@ -179,31 +179,105 @@ class DDPM(BaseMethod):
         return posterior_mean + torch.exp(0.5 * log_var) * noise
 
     @torch.no_grad()
+    def reverse_process_ddim(
+        self,
+        x_t: torch.Tensor,
+        t: torch.Tensor,
+        t_prev: torch.Tensor,
+        eta: float = 0.0,
+    ) -> torch.Tensor:
+        """
+        One step of DDIM reverse process.
+        """
+        pred = self.model(x_t, t)
+        sqrt_alpha_cumprod = self._extract(self.sqrt_alphas_cumprod, t, x_t.shape)
+        sqrt_one_minus = self._extract(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape)
+
+        if self.parameterization == "eps":
+            eps_pred = pred
+            x_0_pred = (x_t - sqrt_one_minus * eps_pred) / sqrt_alpha_cumprod
+        elif self.parameterization == "x0":
+            x_0_pred = pred
+            eps_pred = (x_t - sqrt_alpha_cumprod * x_0_pred) / sqrt_one_minus
+        else:  # "v"
+            v = pred
+            x_0_pred = sqrt_alpha_cumprod * x_t - sqrt_one_minus * v
+            eps_pred = sqrt_one_minus * x_t + sqrt_alpha_cumprod * v
+
+        x_0_pred = torch.clamp(x_0_pred, -1.0, 1.0)
+
+        alpha_bar_t = self._extract(self.alphas_cumprod, t, x_t.shape)
+        alpha_bar_prev = self._extract(self.alphas_cumprod, t_prev, x_t.shape)
+
+        sigma_t = (
+            eta
+            * torch.sqrt((1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t))
+            * torch.sqrt(1.0 - alpha_bar_t / alpha_bar_prev)
+        )
+        noise = torch.randn_like(x_t)
+
+        x_prev = (
+            torch.sqrt(alpha_bar_prev) * x_0_pred
+            + torch.sqrt(1.0 - alpha_bar_prev - sigma_t**2) * eps_pred
+            + sigma_t * noise
+        )
+        return x_prev
+
+    @torch.no_grad()
     def sample(
         self,
         batch_size: int,
         image_shape: Tuple[int, int, int],
         num_steps: Optional[int] = None,
+        sampler: str = "ddpm",
+        eta: float = 0.0,
         **kwargs
     ) -> torch.Tensor:
         """
-        Implement DDPM sampling loop.
+        Implement DDPM/DDIM sampling loop.
         """
         self.eval_mode()
         device = self.device
         x = torch.randn((batch_size, *image_shape), device=device)
-        
+
         # If num_steps is not provided, use the default num_timesteps
         num_steps = num_steps or self.num_timesteps
-        
+
         # Create a linear sequence of timesteps to sample from
         # e.g., if num_steps=100 and self.num_timesteps=1000, indices will be 999, 989, 979...
         indices = torch.linspace(self.num_timesteps - 1, 0, steps=num_steps).long()
 
-        for i in tqdm(indices, desc=f"Sampling ({num_steps} steps)", leave=False):
+        if sampler == "ddpm":
+            for i in tqdm(indices, desc=f"Sampling ({num_steps} steps)", leave=False):
+                t = torch.full((batch_size,), i, device=device, dtype=torch.long)
+                x = self.reverse_process_ddpm(x, t)
+            return x
+
+        if sampler != "ddim":
+            raise ValueError(f"Unknown sampler: {sampler}. Use 'ddpm' or 'ddim'.")
+
+        # DDIM sampling
+        for idx, i in enumerate(tqdm(indices, desc=f"DDIM Sampling ({num_steps} steps)", leave=False)):
             t = torch.full((batch_size,), i, device=device, dtype=torch.long)
-            x = self.reverse_process(x, t)
-            
+
+            if idx == len(indices) - 1:
+                pred = self.model(x, t)
+                sqrt_alpha_cumprod = self._extract(self.sqrt_alphas_cumprod, t, x.shape)
+                sqrt_one_minus = self._extract(self.sqrt_one_minus_alphas_cumprod, t, x.shape)
+
+                if self.parameterization == "eps":
+                    x = (x - sqrt_one_minus * pred) / sqrt_alpha_cumprod
+                elif self.parameterization == "x0":
+                    x = pred
+                else:  # "v"
+                    x = sqrt_alpha_cumprod * x - sqrt_one_minus * pred
+                x = torch.clamp(x, -1.0, 1.0)
+                continue
+
+            prev_i = indices[idx + 1]
+            t_prev = torch.full((batch_size,), prev_i, device=device, dtype=torch.long)
+            x = self.reverse_process_ddim(x, t, t_prev, eta=eta)
+
         return x
 
     # =========================================================================
