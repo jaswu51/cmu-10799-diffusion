@@ -6,6 +6,7 @@ diffusion models and flow matching.
 """
 
 from .unet import UNet, create_model_from_config
+from .dit import DiT, create_dit_from_config
 from .blocks import (
     SinusoidalPositionalEmbedding,
     TimestepEmbedding,
@@ -17,12 +18,14 @@ from .blocks import (
 )
 
 __all__ = [
-    # Main model
+    # Main models
     'UNet',
+    'DiT',
     'create_model_from_config',
+    'create_dit_from_config',
     # Building blocks
     'SinusoidalPositionalEmbedding',
-    'TimestepEmbedding', 
+    'TimestepEmbedding',
     'ResBlock',
     'AttentionBlock',
     'Downsample',

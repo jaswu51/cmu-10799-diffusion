@@ -41,8 +41,9 @@ from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from src.models import UNet, create_model_from_config
+from src.models.dit import DiT, create_dit_from_config
 from src.data import create_dataloader_from_config, save_image, unnormalize
-from src.methods import DDPM, FlowMatching
+from src.methods import DDPM, FlowMatching, RectifiedFlow
 from src.utils import EMA
 
 import wandb
@@ -351,10 +352,28 @@ def train(
     training_config = config['training']
     data_config = config['data']
 
+    # Determine if this is a reflow (Stage 2) training run
+    is_reflow = method_name == 'reflow'
+    reflow_config = config.get('reflow', {})
+
     # Create data loader
     if is_main_process:
         print("Creating data loader...")
-    dataloader = create_dataloader_from_config(config, split='train')
+
+    if is_reflow:
+        from src.data.reflow_dataset import ReflowDataset
+        pairs_dir = reflow_config.get('pairs_dir', 'data/reflow_pairs')
+        dataset = ReflowDataset(pairs_dir)
+        dataloader = DataLoader(
+            dataset,
+            batch_size=training_config['batch_size'],
+            shuffle=True,
+            num_workers=data_config['num_workers'],
+            pin_memory=data_config.get('pin_memory', True),
+            drop_last=True,
+        )
+    else:
+        dataloader = create_dataloader_from_config(config, split='train')
     sampler = None
     if is_distributed:
         sampler = DistributedSampler(
@@ -380,7 +399,11 @@ def train(
     # Create model
     if is_main_process:
         print("Creating model...")
-    base_model = create_model_from_config(config).to(device)
+    model_type = config.get('model', {}).get('type', 'unet')
+    if model_type == 'dit':
+        base_model = create_dit_from_config(config).to(device)
+    else:
+        base_model = create_model_from_config(config).to(device)
 
     torch.manual_seed(seed + rank)
     if torch.cuda.is_available():
@@ -408,10 +431,21 @@ def train(
             print(f"DDPM parameterization: {method.parameterization}")
     elif method_name == 'flow_matching':
         method = FlowMatching.from_config(model, config, device)
+    elif method_name in ('rectified_flow', 'reflow'):
+        method = RectifiedFlow.from_config(model, config, device)
     else:
         raise ValueError(
-            f"Unknown method: {method_name}. Only 'ddpm' and 'flow_matching' are currently supported."
+            f"Unknown method: {method_name}. "
+            f"Supported: 'ddpm', 'flow_matching', 'rectified_flow', 'reflow'."
         )
+
+    # For reflow: optionally initialize from Stage 1 weights
+    if is_reflow and reflow_config.get('init_from_stage1'):
+        stage1_path = reflow_config['init_from_stage1']
+        if is_main_process:
+            print(f"Initializing from Stage 1 checkpoint: {stage1_path}")
+        stage1_ckpt = torch.load(stage1_path, map_location=device)
+        unwrap_model(model).load_state_dict(stage1_ckpt['model'])
 
     # Create optimizer
     optimizer = create_optimizer(model, config) # default to AdamW optimizer
@@ -531,15 +565,23 @@ def train(
                 batch = next(data_iter)
 
             if isinstance(batch, (tuple, list)):
-                batch = batch[0]  # Handle (image, label) tuples
+                if is_reflow:
+                    batch = (batch[0].to(device), batch[1].to(device))
+                else:
+                    batch = batch[0]  # Handle (image, label) tuples
+                    batch = batch.to(device)
+            else:
+                batch = batch.to(device)
 
-            batch = batch.to(device)
-        
         # Forward pass with mixed precision
         optimizer.zero_grad()
-        
+
         with autocast(device_type, enabled=config['infrastructure']['mixed_precision']):
-            loss, metrics = method.compute_loss(batch)
+            if is_reflow:
+                x_0, x_1_hat = batch
+                loss, metrics = method.compute_loss_reflow(x_0, x_1_hat)
+            else:
+                loss, metrics = method.compute_loss(batch)
         
         # Backward pass
         scaler.scale(loss).backward()
@@ -671,8 +713,8 @@ def train(
 def main():
     parser = argparse.ArgumentParser(description='Train diffusion models')
     parser.add_argument('--method', type=str, required=True,
-                       choices=['ddpm'], # You can add more later
-                       help='Method to train (currently only ddpm is supported)')
+                       choices=['ddpm', 'flow_matching', 'rectified_flow', 'reflow'],
+                       help='Method to train')
     parser.add_argument('--config', type=str, required=True,
                        help='Path to config file (e.g., configs/ddpm.yaml)')
     parser.add_argument(

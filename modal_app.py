@@ -34,6 +34,8 @@ image = (
         "wandb>=0.15.0",
         "datasets>=2.0.0",  # For HuggingFace Hub dataset loading
         "torch-fidelity>=0.3.0",  # Comprehensive evaluation metrics
+        "scikit-learn>=1.0.0",  # PCA for trajectory visualization
+        "matplotlib>=3.5.0",  # Plotting
     )
     # Copy the local project directory into the image
     .add_local_dir(
@@ -120,6 +122,14 @@ def _train_impl(
     config['data']['root'] = "/data/celeba"
     config['checkpoint']['dir'] = f"/data/checkpoints/{config_tag}"
     config['logging']['dir'] = f"/data/logs/{config_tag}"
+
+    # For reflow: override pairs_dir to Modal volume path
+    if 'reflow' in config:
+        config['reflow']['pairs_dir'] = "/data/reflow_pairs"
+        # If init_from_stage1 is set, prepend /data/
+        init_path = config['reflow'].get('init_from_stage1')
+        if init_path and not init_path.startswith('/data'):
+            config['reflow']['init_from_stage1'] = f"/data/{init_path}"
 
     # Create directories
     os.makedirs(config['checkpoint']['dir'], exist_ok=True)
@@ -484,6 +494,142 @@ def evaluate_torch_fidelity(
 
 
 # =============================================================================
+# Reflow Pair Generation Function
+# =============================================================================
+
+@app.function(
+    image=image,
+    gpu="L40S",
+    timeout=60 * 60 * 6,  # 6 hours
+    volumes={"/data": volume},
+)
+def generate_pairs(
+    checkpoint: str = "logs/rectified_flow/checkpoints/rectified_flow_final.pt",
+    num_pairs: int = 60000,
+    batch_size: int = 256,
+    num_steps: int = 50,
+    output_dir: str = "reflow_pairs",
+    seed: int = 42,
+):
+    """Generate synthetic (noise, image) pairs for Reflow Stage 2."""
+    import subprocess
+
+    checkpoint_path = f"/data/{checkpoint}"
+    output_path = f"/data/{output_dir}"
+
+    cmd = [
+        "python", "/root/generate_reflow_pairs.py",
+        "--checkpoint", checkpoint_path,
+        "--num_pairs", str(num_pairs),
+        "--batch_size", str(batch_size),
+        "--num_steps", str(num_steps),
+        "--output_dir", output_path,
+        "--seed", str(seed),
+    ]
+
+    subprocess.run(cmd, check=True)
+    volume.commit()
+
+    return f"Generated {num_pairs} reflow pairs to {output_path}"
+
+
+# =============================================================================
+# Trajectory Visualization Function
+# =============================================================================
+
+@app.function(
+    image=image,
+    gpu="L40S",
+    timeout=60 * 60 * 2,  # 2 hours
+    volumes={"/data": volume},
+)
+def visualize(
+    checkpoint: str = None,
+    checkpoint2: str = None,
+    label1: str = "1-Rectified Flow",
+    label2: str = "2-Rectified Flow (Reflow)",
+    num_trajectories: int = 20,
+    num_steps: int = 50,
+    output_dir: str = "visualizations",
+    seed: int = 42,
+):
+    """Visualize ODE trajectories: PCA plots, straightness, interpolation grids."""
+    import subprocess
+
+    checkpoint_path = f"/data/{checkpoint}"
+    output_path = f"/data/{output_dir}"
+
+    cmd = [
+        "python", "/root/visualize_trajectories.py",
+        "--checkpoint", checkpoint_path,
+        "--label1", label1,
+        "--label2", label2,
+        "--num_trajectories", str(num_trajectories),
+        "--num_steps", str(num_steps),
+        "--output_dir", output_path,
+        "--seed", str(seed),
+    ]
+
+    if checkpoint2:
+        cmd.extend(["--checkpoint2", f"/data/{checkpoint2}"])
+
+    subprocess.run(cmd, check=True)
+    volume.commit()
+
+    return f"Visualizations saved to {output_path}"
+
+
+# =============================================================================
+# Sample Grid at Multiple Step Counts
+# =============================================================================
+
+@app.function(
+    image=image,
+    gpu="L40S",
+    timeout=60 * 60 * 3,
+    volumes={"/data": volume},
+)
+def sample_grid_multi_steps(
+    method: str = "rectified_flow",
+    checkpoint: str = None,
+    step_counts: str = "1,2,5,10,20,50",
+    num_samples: int = 64,
+    seed: int = 42,
+    output_dir: str = "samples",
+):
+    """Generate sample grids at multiple step counts for comparison."""
+    import os
+    import subprocess
+
+    checkpoint_path = f"/data/{checkpoint}"
+    output_base = f"/data/{output_dir}"
+    os.makedirs(output_base, exist_ok=True)
+
+    steps_list = [int(s.strip()) for s in step_counts.split(",")]
+
+    for nsteps in steps_list:
+        output_path = os.path.join(output_base, f"samples_steps{nsteps:03d}.png")
+        cmd = [
+            "python", "/root/sample.py",
+            "--checkpoint", checkpoint_path,
+            "--method", method,
+            "--grid",
+            "--output", output_path,
+            "--num_samples", str(num_samples),
+            "--num_steps", str(nsteps),
+            "--seed", str(seed),
+        ]
+        print(f"\n{'='*60}")
+        print(f"Generating {num_samples} samples at {nsteps} steps...")
+        print(f"{'='*60}")
+        subprocess.run(cmd, check=True)
+        print(f"Saved to {output_path}")
+
+    volume.commit()
+    return f"Saved sample grids at steps={step_counts} to {output_base}"
+
+
+# =============================================================================
 # CLI Entry Points
 # =============================================================================
 
@@ -493,11 +639,14 @@ def main(
     method: str = "ddpm",
     config: str = None,
     checkpoint: str = None,
+    checkpoint2: str = None,
     iterations: int = None,
     batch_size: int = None,
     learning_rate: float = None,
     num_samples: int = None,
     num_steps: int = None,
+    num_pairs: int = None,
+    step_counts: str = None,
     seed: int = None,
     sampler: str = None,
     eta: float = None,
@@ -506,6 +655,7 @@ def main(
     loss_csv: str = None,
     loss_png: str = None,
     metrics: str = None,
+    output_dir: str = None,
     overfit_single_batch: bool = False,
     override: bool = False,
 ):
@@ -516,6 +666,9 @@ def main(
 
     All parameters are read from config YAML files first, then overridden by command-line arguments.
     """
+    # Normalize action name: accept both hyphens and underscores
+    action = action.replace("-", "_")
+
     if action == "download":
         result = download_dataset.remote()
         print(result)
@@ -586,6 +739,57 @@ def main(
             eval_kwargs['eta'] = eta
 
         result = evaluate_torch_fidelity.remote(**eval_kwargs)
+        print(result)
+    elif action == "generate_pairs":
+        if checkpoint is None:
+            raise ValueError("--checkpoint is required for generate_pairs")
+        pair_kwargs = {
+            'checkpoint': checkpoint,
+        }
+        if num_pairs is not None:
+            pair_kwargs['num_pairs'] = num_pairs
+        if batch_size is not None:
+            pair_kwargs['batch_size'] = batch_size
+        if num_steps is not None:
+            pair_kwargs['num_steps'] = num_steps
+        if output_dir is not None:
+            pair_kwargs['output_dir'] = output_dir
+        if seed is not None:
+            pair_kwargs['seed'] = seed
+        result = generate_pairs.remote(**pair_kwargs)
+        print(result)
+    elif action == "visualize":
+        if checkpoint is None:
+            raise ValueError("--checkpoint is required for visualize")
+        viz_kwargs = {
+            'checkpoint': checkpoint,
+        }
+        if checkpoint2 is not None:
+            viz_kwargs['checkpoint2'] = checkpoint2
+        if output_dir is not None:
+            viz_kwargs['output_dir'] = output_dir
+        if seed is not None:
+            viz_kwargs['seed'] = seed
+        if num_steps is not None:
+            viz_kwargs['num_steps'] = num_steps
+        result = visualize.remote(**viz_kwargs)
+        print(result)
+    elif action == "sample_multi_steps":
+        if checkpoint is None:
+            raise ValueError("--checkpoint is required for sample_multi_steps")
+        grid_kwargs = {
+            'method': method,
+            'checkpoint': checkpoint,
+        }
+        if step_counts is not None:
+            grid_kwargs['step_counts'] = step_counts
+        if num_samples is not None:
+            grid_kwargs['num_samples'] = num_samples
+        if seed is not None:
+            grid_kwargs['seed'] = seed
+        if output_dir is not None:
+            grid_kwargs['output_dir'] = output_dir
+        result = sample_grid_multi_steps.remote(**grid_kwargs)
         print(result)
     elif action == "plot_loss":
         # Local-only utility: pull Modal app logs and generate a loss curve CSV/PNG
@@ -681,4 +885,4 @@ def main(
             )
     else:
         print(f"Unknown action: {action}")
-        print("Valid actions: download, train, sample, evaluate, plot_loss")
+        print("Valid actions: download, train, sample, evaluate, generate_pairs, visualize, sample_multi_steps, plot_loss")

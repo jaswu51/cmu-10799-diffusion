@@ -13,9 +13,11 @@ from .celeba import (
     make_grid,
     save_image,
 )
+from .reflow_dataset import ReflowDataset
 
 __all__ = [
     'CelebADataset',
+    'ReflowDataset',
     'create_dataloader',
     'create_dataloader_from_config',
     'unnormalize',

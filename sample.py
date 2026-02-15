@@ -32,8 +32,9 @@ import torch
 from tqdm import tqdm
 
 from src.models import create_model_from_config
+from src.models.dit import create_dit_from_config
 from src.data import save_image, unnormalize
-from src.methods import DDPM, FlowMatching
+from src.methods import DDPM, FlowMatching, RectifiedFlow
 from src.utils import EMA
 
 
@@ -41,15 +42,19 @@ def load_checkpoint(checkpoint_path: str, device: torch.device):
     """Load checkpoint and return model, config, and EMA."""
     checkpoint = torch.load(checkpoint_path, map_location=device)
     config = checkpoint['config']
-    
-    # Create model
-    model = create_model_from_config(config).to(device)
+
+    # Create model (handle both UNet and DiT)
+    model_type = config.get('model', {}).get('type', 'unet')
+    if model_type == 'dit':
+        model = create_dit_from_config(config).to(device)
+    else:
+        model = create_model_from_config(config).to(device)
     model.load_state_dict(checkpoint['model'])
-    
+
     # Create EMA and load
     ema = EMA(model, decay=config['training']['ema_decay'])
     ema.load_state_dict(checkpoint['ema'])
-    
+
     return model, config, ema
 
 
@@ -81,7 +86,7 @@ def main():
     parser.add_argument('--checkpoint', type=str, required=True,
                        help='Path to model checkpoint')
     parser.add_argument('--method', type=str, required=True,
-                       choices=['ddpm', 'flow_matching'],
+                       choices=['ddpm', 'flow_matching', 'rectified_flow', 'reflow'],
                        help='Method used for training')
     parser.add_argument('--num_samples', type=int, default=64,
                        help='Number of samples to generate')
@@ -132,9 +137,12 @@ def main():
         method = DDPM.from_config(model, config, device)
     elif args.method == 'flow_matching':
         method = FlowMatching.from_config(model, config, device)
+    elif args.method in ('rectified_flow', 'reflow'):
+        method = RectifiedFlow.from_config(model, config, device)
     else:
         raise ValueError(
-            f"Unknown method: {args.method}. Only 'ddpm' and 'flow_matching' are currently supported."
+            f"Unknown method: {args.method}. "
+            f"Supported: 'ddpm', 'flow_matching', 'rectified_flow', 'reflow'."
         )
     
     # Apply EMA weights

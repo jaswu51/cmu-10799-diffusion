@@ -8,9 +8,11 @@ This module contains implementations of generative modeling methods:
 from .base import BaseMethod
 from .ddpm import DDPM
 from .flow_matching import FlowMatching
+from .rectified_flow import RectifiedFlow
 
 __all__ = [
     'BaseMethod',
     'DDPM',
     'FlowMatching',
+    'RectifiedFlow',
 ]
