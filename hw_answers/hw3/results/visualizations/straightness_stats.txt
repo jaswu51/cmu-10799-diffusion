@@ -1,0 +1,2 @@
+1-Rectified Flow: S = 0.989306 +/- 0.003226
+2-Rectified Flow (Reflow): S = 0.999740 +/- 0.000069
